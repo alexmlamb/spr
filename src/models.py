@@ -466,7 +466,14 @@ class MPRCatDqnModel(torch.nn.Module):
             #print('clamped latents shape', clamped_latents.shape)
 
             gen_latents = []
-            for j in range(0, observation.shape[0]): 
+
+            latent = self.stem_forward(input_obs,
+                                       prev_action[0],
+                                       prev_reward[0])
+
+            gen_latents.append(latent.reshape(1,latent.shape[0],7*7*64))
+
+            for j in range(1, observation.shape[0]): 
                 latent, _ = self.step(latent, prev_action[j])
                 gen_latents.append(latent.reshape(1,latent.shape[0],7*7*64))
 
