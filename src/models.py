@@ -13,7 +13,7 @@ from kornia.augmentation import RandomAffine,\
 from kornia.filters import GaussianBlur2d
 import copy
 import wandb
-
+import random
 
 class MPRCatDqnModel(torch.nn.Module):
     """2D conlutional network feeding into MLP with ``n_atoms`` outputs
@@ -73,6 +73,9 @@ class MPRCatDqnModel(torch.nn.Module):
 
         self.transforms = []
         self.eval_transforms = []
+
+        self.disc_lstm = nn.LSTM(7*7*64, 600)
+        self.disc_linear = nn.Linear(600,1)
 
         self.uses_augmentation = False
         for aug in augmentation:
@@ -151,6 +154,8 @@ class MPRCatDqnModel(torch.nn.Module):
                                                    std_init=noisy_nets_std)
 
         if self.jumps > 0:
+            print('jumps', self.jumps)
+            print('dynamics blocks', dynamics_blocks)
             self.dynamics_model = TransitionModel(channels=self.hidden_size,
                                                   num_actions=output_size,
                                                   pixels=self.pixels,
@@ -285,6 +290,7 @@ class MPRCatDqnModel(torch.nn.Module):
             self.head.set_sampling(sampling)
 
     def mpr_loss(self, f_x1s, f_x2s):
+        #print('f_x1s for mse shape', f_x1s.shape)
         f_x1 = F.normalize(f_x1s.float(), p=2., dim=-1, eps=1e-3)
         f_x2 = F.normalize(f_x2s.float(), p=2., dim=-1, eps=1e-3)
         loss = F.mse_loss(f_x1, f_x2, reduction="none").sum(-1).mean(0)
@@ -436,9 +442,56 @@ class MPRCatDqnModel(torch.nn.Module):
             pred_latents = []
             input_obs = observation[0].flatten(1, 2)
             input_obs = self.transform(input_obs, augment=True)
+            #print('input_obs shape', input_obs.shape)
+            #print('prev action len', len(prev_action))
+            #print('prev reward shape', len(prev_reward))
+            #print('observation shape', observation.shape)
+            
+            from torchvision.utils import save_image
+            obs_save = observation.double()
+            #print('observation min mean max', obs_save.min(), obs_save.mean(), obs_save.max())
+            obs_save = obs_save - obs_save.min()
+            obs_save = obs_save / obs_save.max()
+            #save_image(obs_save[:,0,0].data.cpu().double(), 'obs.png')
+            #raise Exception('done')
+            
+            #clamped
+            clamped_latents = []
+            for j in range(0,observation.shape[0]):
+                latent = self.stem_forward(self.transform(observation[j].flatten(1,2), augment=True),prev_action[j],prev_reward[j])
+                clamped_latents.append(latent.reshape(1,latent.shape[0],7*7*64))
+
+            clamped_latents = torch.cat(clamped_latents,dim=0)
+
+            #print('clamped latents shape', clamped_latents.shape)
+
+            gen_latents = []
+            for j in range(0, observation.shape[0]): 
+                latent, _ = self.step(latent, prev_action[j])
+                gen_latents.append(latent.reshape(1,latent.shape[0],7*7*64))
+
+            gen_latents = torch.cat(gen_latents, dim=0)
+
+            #print('gen latents shape', gen_latents.shape)
+
+            disc_seq_clamped = self.disc_linear(self.disc_lstm(clamped_latents.detach())[0])
+            disc_seq_gen = self.disc_linear(self.disc_lstm(gen_latents.detach())[0])
+
+            #print('disc seq shape', disc_seq_clamped.shape)
+
+
+            disc_loss = ((disc_seq_clamped - 1.0)**2).mean() + ((disc_seq_gen - 0.0)**2).mean()
+
+            if random.uniform(0,1) < 0.001:
+                print('disc loss', disc_loss)
+                for ts in range(0, observation.shape[0]):
+                    disc_acc = torch.gt(disc_seq_clamped[ts], 0.5).double().mean()*0.5 + torch.lt(disc_seq_gen[ts], 0.5).double().mean()*0.5
+                    print('disc acc', ts, disc_acc)
+
             latent = self.stem_forward(input_obs,
                                        prev_action[0],
                                        prev_reward[0])
+
             log_pred_ps.append(self.head_forward(latent,
                                                  prev_action[0],
                                                  prev_reward[0],
@@ -448,7 +501,9 @@ class MPRCatDqnModel(torch.nn.Module):
                 pred_rew = self.dynamics_model.reward_predictor(pred_latents[0])
                 pred_reward.append(F.log_softmax(pred_rew, -1))
 
+                #print('num jumps', self.jumps)
                 for j in range(1, self.jumps + 1):
+                    #print('latent shape', latent.shape)
                     latent, pred_rew = self.step(latent, prev_action[j])
                     pred_rew = pred_rew[:observation.shape[1]]
                     pred_latents.append(latent)
@@ -468,7 +523,7 @@ class MPRCatDqnModel(torch.nn.Module):
 
             return log_pred_ps,\
                    pred_reward,\
-                   mpr_loss
+                   mpr_loss + disc_loss
 
         else:
             aug_factor = self.target_augmentation if not eval else self.eval_augmentation
