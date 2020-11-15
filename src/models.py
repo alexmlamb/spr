@@ -76,6 +76,8 @@ class MPRCatDqnModel(torch.nn.Module):
 
         self.disc_lstm = nn.LSTM(7*7*64, 600)
         self.disc_linear = nn.Linear(600,1)
+        self.optimize_disc = True
+        self.disc_counter = 0
 
         self.uses_augmentation = False
         for aug in augmentation:
@@ -486,14 +488,30 @@ class MPRCatDqnModel(torch.nn.Module):
 
             #print('disc seq shape', disc_seq_clamped.shape)
 
+            disc_acc = torch.gt(disc_seq_clamped, 0.5).double().mean()*0.5 + torch.lt(disc_seq_gen, 0.5).double().mean()*0.5
 
-            disc_loss = ((disc_seq_clamped - 1.0)**2).mean() + ((disc_seq_gen - 0.0)**2).mean()
+            if True:
+                disc_loss = 0.1 * (((disc_seq_clamped - 1.0)**2).mean() + ((disc_seq_gen - 0.0)**2).mean())
+            else:
+                disc_loss = 0.0
 
-            if random.uniform(0,1) < 0.001:
+            train_gen = True
+            #Add this loss in for discriminator, so it will cancel out gradients for discriminator, but other loss will flow into generator
+            if train_gen: 
+                disc_loss += -1.0 * ((disc_seq_gen - 1.0)**2).mean()
+
+            disc_seq_gen_train = self.disc_linear(self.disc_lstm(gen_latents)[0])
+            if train_gen:
+                disc_loss += ((disc_seq_gen_train - 1.0)**2).mean()
+
+            if random.uniform(0,1) < 0.1:
+                print('disc acc', disc_acc)
                 print('disc loss', disc_loss)
                 for ts in range(0, observation.shape[0]):
-                    disc_acc = torch.gt(disc_seq_clamped[ts], 0.5).double().mean()*0.5 + torch.lt(disc_seq_gen[ts], 0.5).double().mean()*0.5
-                    print('disc acc', ts, disc_acc)
+                    #disc_acc = torch.gt(disc_seq_clamped[ts], 0.5).double().mean()*0.5 + torch.lt(disc_seq_gen[ts], 0.5).double().mean()*0.5
+                    #print('disc acc', ts, disc_acc)
+                    disc_loss_step = ((disc_seq_clamped[ts] - 1.0)**2).mean() + ((disc_seq_gen[ts] - 0.0)**2).mean()
+                    print('disc loss', ts, disc_loss_step)
 
             latent = self.stem_forward(input_obs,
                                        prev_action[0],
